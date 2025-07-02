@@ -6,6 +6,7 @@ from scipy.stats import spearmanr
 from joblib import Parallel, delayed
 import statsmodels.api as sm
 import random
+import matplotlib.pyplot as plt
 
 # === USER PARAMS ===
 MAX_VARS = 10
@@ -83,6 +84,48 @@ def compute_x_mse(y_pred, target_dates):
     target_x = {k: target_date_to_x(v, forecast_start) for k,v in target_dates.items()}
     return np.mean([(pred_events[k] - target_x[k])**2 for k in pred_events])
 
+def get_predicted_events(y_pred):
+    """Return key event x positions from the predicted series."""
+    if y_pred.empty:
+        return None
+    x = np.arange(len(y_pred))
+    poly = np.poly1d(np.polyfit(x, y_pred.values, 3))
+    zeros = poly_zeros(poly)
+    max_x, min_x = poly_extrema(poly)
+    if len(zeros) < 2 or max_x is None or min_x is None:
+        return None
+    return {
+        'first_zero': zeros[0],
+        'max': max_x,
+        'second_zero': zeros[1],
+        'min': min_x,
+        'last_zero': zeros[-1] if len(zeros) >= 3 else zeros[1]
+    }
+
+def plot_prediction_arrow(y_pred, target_dates):
+    """Plot predicted event positions vs target dates with arrows."""
+    events = get_predicted_events(y_pred)
+    if events is None:
+        print("Cannot compute events for plotting")
+        return
+    forecast_start = y_pred.index[0]
+    target_x = {k: target_date_to_x(v, forecast_start) for k, v in target_dates.items()}
+
+    fig, ax = plt.subplots()
+    for name, pred_x in events.items():
+        tgt_x = target_x.get(name)
+        ax.plot(pred_x, 0, 'bo')
+        ax.plot(tgt_x, 0, 'ro')
+        ax.annotate('', xy=(tgt_x, 0), xytext=(pred_x, 0),
+                    arrowprops=dict(arrowstyle='<->', color='green'))
+        ax.text(pred_x, 0.02, name, rotation=45, ha='right')
+    ax.set_yticks([])
+    ax.set_xlabel('Months from forecast start')
+    ax.legend(['Predicted', 'Target'])
+    ax.set_title('Predicted vs Target Event Positions')
+    plt.tight_layout()
+    plt.show()
+
 # === Generate valid variable sets ===
 print("🧠 Generating valid variable sets...")
 spearman_corr = df[all_vars].corr(method='spearman')
@@ -99,6 +142,16 @@ for n_vars in range(1, MAX_VARS+1):
 def evaluate_combo(var_list, lag_list):
     if len(var_list) * len(lag_list) > MAX_FEATURES:
         return None
+
+def generate_prediction(var_list, lag_list):
+    """Return prediction series for a given variable and lag list."""
+    X_train, y_train = create_lagged_features(train, var_list, lag_list)
+    X_test, _ = create_lagged_features(combined, var_list, lag_list)
+    X_test = X_test.loc[test.index.intersection(X_test.index)]
+    X_train_const = sm.add_constant(X_train)
+    X_test_const = sm.add_constant(X_test)
+    model = sm.OLS(y_train, X_train_const).fit()
+    return model.predict(X_test_const)
     try:
         X_train, y_train = create_lagged_features(train, var_list, lag_list)
         X_test, y_test = create_lagged_features(combined, var_list, lag_list)
@@ -148,3 +201,12 @@ for i, model in enumerate(top_models, 1):
     print(f"Rank {i}: X-MSE={model['x_mse']:.4f}")
     print(f"    Variables: {model['variables']}")
     print(f"    Lags     : {model['lags']}\n")
+
+if top_models:
+    print("\n🎨 Plotting prediction vs target for best model...")
+    best = top_models[0]
+    try:
+        y_pred = generate_prediction(best['variables'], best['lags'])
+        plot_prediction_arrow(y_pred, TARGET_DATES)
+    except Exception as e:
+        print(f"Plotting failed: {e}")
